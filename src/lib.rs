@@ -233,16 +233,8 @@ impl<C: Delegatable> Rcan<C> {
         let Some(source_cap) = self.payload.caps.get(&cap_root) else {
             anyhow::bail!("cap is not available");
         };
-        match cap.partial_cmp(source_cap) {
-            Some(Ordering::Less) | Some(Ordering::Equal) => {
-                // all good
-            }
-            None => {
-                anyhow::bail!("cannot delegate: inconclusive");
-            }
-            Some(Ordering::Greater) => {
-                anyhow::bail!("cannot delegate: not allowed");
-            }
+        if !cap.can_delegate_to_us(source_cap) {
+            anyhow::bail!("cannot delegate: not allowed");
         }
 
         let mut caps = Caps::<C>::default();
@@ -318,10 +310,7 @@ fn find_parent<'a, C: Delegatable>(
             if other.payload.audience == rcan.payload.issuer {
                 if let Some(other_cap) = other.payload.caps.get(cap_root) {
                     // other_cap needs to be allowed to delegate to this one
-                    return matches!(
-                        cap.partial_cmp(other_cap),
-                        Some(Ordering::Less) | Some(Ordering::Equal)
-                    );
+                    return cap.can_delegate_to_us(other_cap);
                 }
             }
             false
@@ -332,7 +321,14 @@ fn find_parent<'a, C: Delegatable>(
 /// A cap can be delgated, if we can compare it to another one
 /// `cap_a <= cap_b` means that `cap_a` is a subset or equal of `cap_b`
 /// which would allow a delegation.
-pub trait Delegatable: Capability + PartialOrd {}
+pub trait Delegatable: Capability + PartialOrd {
+    fn can_delegate_to_us(&self, other: &Self) -> bool {
+        matches!(
+            self.partial_cmp(other),
+            Some(Ordering::Less) | Some(Ordering::Equal)
+        )
+    }
+}
 
 impl<C: Capability + PartialOrd> Delegatable for C {}
 
