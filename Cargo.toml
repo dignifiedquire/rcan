@@ -1,0 +1,18 @@
+[package]
+name = "rcan"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.95"
+blake3 = "1.5.5"
+derive_more = { version = "1.0.0", features = ["debug"] }
+ed25519-dalek = { version = "2.1.1", features = ["serde", "rand_core"] }
+hex = "0.4.3"
+postcard = { version = "1.1.1", features = ["use-std"] }
+rand = "0.8.5"
+serde = { version = "1.0.217", features = ["derive"] }
+
+[dev-dependencies]
+bitfields = "0.12.4"
+rand_chacha = "0.3.1"
