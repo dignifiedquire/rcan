@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::time::SystemTime;
 
@@ -32,11 +33,17 @@ pub fn now() -> u64 {
         .as_secs()
 }
 
-#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct Caps<C: Capability = ()>(
     #[serde(bound = "C: Capability")] BTreeMap<VerifyingKeyWrapper, C>,
 );
+
+impl<C: Capability> Default for Caps<C> {
+    fn default() -> Self {
+        Self(BTreeMap::new())
+    }
+}
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Default, derive_more::Debug)]
 #[repr(transparent)]
@@ -167,7 +174,7 @@ impl<C: Capability> Rcan<C> {
         }
     }
 
-    pub fn from_payload(issuer: &mut SigningKey, payload: Payload<C>) -> Result<Self> {
+    pub fn from_payload(issuer: &SigningKey, payload: Payload<C>) -> Result<Self> {
         ensure!(issuer.verifying_key() == payload.issuer, "issuer missmatch");
         let payload_ser = payload.encode_to_bytes();
         let signature = issuer.sign(&payload_ser);
@@ -198,41 +205,136 @@ impl<C: Capability> Rcan<C> {
             ensure!(now <= valid_until, "expired");
         }
 
+        // verify caps
+        for (cap_root, cap) in rcan.payload.caps.iter() {
+            if cap_root == &rcan.payload.issuer {
+                // simple case, issuer can issuer any cap
+            } else {
+                anyhow::bail!(
+                    "invalid delegation: {} -> {:?}",
+                    hex::encode(cap_root.as_bytes()),
+                    cap
+                );
+            }
+        }
         Ok(rcan)
     }
 }
 
-// impl<C: C Payload {
-//     pub fn delegate<R: Rng + CryptoRng, S: CapSelector>(
-//         &self,
-//         mut rng: R,
-//         issuer: &VerifyingKey,
-//         audience: &VerifyingKey,
-//         selector: S,
-//     ) -> Result<Payload> {
-//         let mut caps = Caps::default();
-//         for (cap_root, cap) in self.caps.iter() {
-//             if let Some(new_cap) = selector.select(cap_root, cap) {
-//                 caps.insert(*cap_root, new_cap);
-//             }
-//         }
+impl<C: Delegatable> Rcan<C> {
+    pub fn delegate<R: Rng + CryptoRng>(
+        &self,
+        mut rng: R,
+        issuer: &SigningKey,
+        audience: VerifyingKey,
+        cap_root: VerifyingKey,
+        cap: C,
+    ) -> Result<Self> {
+        let Some(source_cap) = self.payload.caps.get(&cap_root) else {
+            anyhow::bail!("cap is not available");
+        };
+        match cap.partial_cmp(source_cap) {
+            Some(Ordering::Less) | Some(Ordering::Equal) => {
+                // all good
+            }
+            None => {
+                anyhow::bail!("cannot delegate: inconclusive");
+            }
+            Some(Ordering::Greater) => {
+                anyhow::bail!("cannot delegate: not allowed");
+            }
+        }
 
-//         let nonce: [u8; NONCE_SIZE] = rng.gen();
+        let mut caps = Caps::<C>::default();
+        caps.insert(cap_root, cap);
 
-//         Ok(Payload {
-//             issuer: issuer.clone(),
-//             nonce,
-//             audience: audience.clone(),
-//             caps,
-//             valid_until: None,
-//         })
-//     }
-// }
-//
-// pub trait CapSelector {
-//     /// Returns a selection of the provided caps
-//     fn select(&self, source: &VerifyingKey, cap: &Cap) -> Option<Cap>;
-// }
+        let nonce: [u8; NONCE_SIZE] = rng.gen();
+        let payload = Payload {
+            issuer: issuer.verifying_key(),
+            nonce,
+            audience,
+            caps,
+            valid_until: None,
+        };
+
+        Self::from_payload(issuer, payload)
+    }
+
+    pub fn decode_with_time_and_chain(
+        bytes: &[u8],
+        now: u64,
+        delegation_chain: &[&Rcan<C>],
+    ) -> Result<Self> {
+        let rcan: Rcan<C> = postcard::from_bytes(bytes).context("encoding")?;
+        ensure!(rcan.version == VERSION, "invalid version: {}", rcan.version);
+        rcan.payload
+            .issuer
+            .verify_strict(&bytes[PAYLOAD_OFFSET..], &rcan.signature)?;
+
+        if let Some(valid_until) = rcan.payload.valid_until {
+            ensure!(now <= valid_until, "expired");
+        }
+
+        // verify caps
+        for (cap_root, cap) in rcan.payload.caps.iter() {
+            if cap_root == &rcan.payload.issuer {
+                // simple case, issuer can issuer any cap
+            } else {
+                let mut last_parent = &rcan;
+
+                loop {
+                    if let Some(parent) = find_parent(last_parent, cap_root, cap, delegation_chain)
+                    {
+                        if &parent.payload.issuer == cap_root {
+                            // we have hit the end of the chain, done
+                            break;
+                        } else {
+                            last_parent = parent;
+                        }
+                    } else {
+                        anyhow::bail!(
+                            "missing delegation chain elements for {:?}: {:?}",
+                            hex::encode(cap_root.as_bytes()),
+                            cap
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(rcan)
+    }
+}
+
+fn find_parent<'a, C: Delegatable>(
+    rcan: &Rcan<C>,
+    cap_root: &VerifyingKey,
+    cap: &C,
+    delegation_chain: &[&'a Rcan<C>],
+) -> Option<&'a Rcan<C>> {
+    delegation_chain
+        .iter()
+        .find(|other| {
+            if other.payload.audience == rcan.payload.issuer {
+                if let Some(other_cap) = other.payload.caps.get(cap_root) {
+                    // other_cap needs to be allowed to delegate to this one
+                    return matches!(
+                        cap.partial_cmp(other_cap),
+                        Some(Ordering::Less) | Some(Ordering::Equal)
+                    );
+                }
+            }
+            false
+        })
+        .copied()
+}
+
+/// A cap can be delgated, if we can compare it to another one
+/// `cap_a <= cap_b` means that `cap_a` is a subset or equal of `cap_b`
+/// which would allow a delegation.
+pub trait Delegatable: Capability + PartialOrd {}
+
+impl<C: Capability + PartialOrd> Delegatable for C {}
 
 #[cfg(test)]
 mod tests {
@@ -257,53 +359,147 @@ mod tests {
         assert_eq!(rcan, decoded);
     }
 
+    // Two capabilities:
+    // api: none, read, write
+    // app: none, read, write
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
+    #[repr(u8)]
+    enum CapState {
+        None = 0,
+        Read = 1,
+        Write = 2,
+    }
+
+    impl CapState {
+        const fn from_bits(bits: u8) -> Self {
+            match bits {
+                0 => Self::None,
+                1 => Self::Read,
+                2 => Self::Write,
+                _ => Self::Write, // safe default for higher values
+            }
+        }
+
+        const fn into_bits(self) -> u8 {
+            self as u8
+        }
+    }
+
+    // Caps get encoded into a bit vector
+    // 3 states per cap, so we need 2 bits per cap
+    #[bitfield(u8)]
+    #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+    struct MyCap {
+        #[bits(2)]
+        api: CapState,
+        #[bits(2)]
+        app: CapState,
+        /// Unused for now
+        #[bits(4)]
+        _padding: u8,
+    }
+
+    impl PartialOrd for MyCap {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            use std::cmp::Ordering::*;
+
+            let this_api = self.api();
+            let this_app = self.app();
+
+            let other_api = other.api();
+            let other_app = other.app();
+
+            match (this_api.cmp(&other_api), this_app.cmp(&other_app)) {
+                (Less, Less) => Some(Less),
+                (Less, Equal) => Some(Less),
+                (Less, Greater) => None,
+                (Greater, Greater) => Some(Greater),
+                (Greater, Less) => None,
+                (Greater, Equal) => Some(Greater),
+                (Equal, Equal) => Some(Equal),
+                (Equal, Less) => Some(Less),
+                (Equal, Greater) => Some(Greater),
+            }
+        }
+    }
+
+    #[test]
+    fn test_delegate() {
+        let a = MyCapBuilder::new().with_api(CapState::Read).build();
+        let b = MyCapBuilder::new().with_api(CapState::Write).build();
+
+        assert_eq!(a.partial_cmp(&b), Some(Ordering::Less));
+        assert_eq!(a.partial_cmp(&a), Some(Ordering::Equal));
+        assert_eq!(b.partial_cmp(&a), Some(Ordering::Greater));
+
+        let a = MyCapBuilder::new()
+            .with_api(CapState::Read)
+            .with_app(CapState::Write)
+            .build();
+        let b = MyCapBuilder::new()
+            .with_api(CapState::Write)
+            .with_app(CapState::Write)
+            .build();
+
+        assert_eq!(a.partial_cmp(&b), Some(Ordering::Less));
+
+        let mut rng = ChaCha8Rng::seed_from_u64(0);
+
+        // Delegate from root_issuer -> receiver_1 -> receiver_2
+
+        let root_issuer = SigningKey::generate(&mut rng);
+        let receiver_1 = SigningKey::generate(&mut rng);
+        let receiver_2 = SigningKey::generate(&mut rng);
+
+        let mut caps = Caps::<MyCap>::default();
+
+        // The root_issuer delegates these caps to receiver_1
+        let write_app_read_api_cap = MyCapBuilder::new()
+            .with_api(CapState::Read)
+            .with_app(CapState::Write)
+            .build();
+        caps.insert(root_issuer.verifying_key(), write_app_read_api_cap);
+
+        let rcan_1 = Rcan::new(&mut rng, &root_issuer, receiver_1.verifying_key(), caps);
+        {
+            let encoded = rcan_1.encode_to_bytes();
+            let decoded = Rcan::decode(&encoded).expect("failed to verify");
+            assert_eq!(rcan_1, decoded);
+        }
+
+        // receiver_1 delegates this to receiver_2
+        let read_app_read_api_cap = MyCapBuilder::new()
+            .with_api(CapState::Read)
+            .with_app(CapState::Read)
+            .build();
+
+        let rcan_2 = rcan_1
+            .delegate(
+                &mut rng,
+                &receiver_1,
+                receiver_2.verifying_key(),
+                root_issuer.verifying_key(),
+                read_app_read_api_cap,
+            )
+            .expect("failed to delegate");
+        {
+            let encoded = rcan_2.encode_to_bytes();
+            let err = Rcan::<MyCap>::decode(&encoded).unwrap_err();
+            assert!(err.to_string().contains("invalid delegation"));
+
+            let decoded = Rcan::decode_with_time_and_chain(&encoded, now(), &[&rcan_1])
+                .expect("invalid delegation");
+            assert_eq!(decoded, rcan_2);
+        }
+    }
+
     #[test]
     fn test_simple_caps() {
         let mut rng = ChaCha8Rng::seed_from_u64(0);
 
         let issuer = SigningKey::generate(&mut rng);
         let receiver = SigningKey::generate(&mut rng);
-
-        // Two capabilities:
-        // api: none, read, write
-        // app: none, read, write
-
-        #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-        #[repr(u8)]
-        enum CapState {
-            None = 0,
-            Read = 1,
-            Write = 2,
-        }
-
-        impl CapState {
-            const fn from_bits(bits: u8) -> Self {
-                match bits {
-                    0 => Self::None,
-                    1 => Self::Read,
-                    2 => Self::Write,
-                    _ => Self::Write, // safe default for higher values
-                }
-            }
-
-            const fn into_bits(self) -> u8 {
-                self as u8
-            }
-        }
-
-        // Caps get encoded into a bit vector
-        // 3 states per cap, so we need 2 bits per cap
-        #[bitfield(u8)]
-        #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-        struct MyCap {
-            #[bits(2)]
-            api: CapState,
-            #[bits(2)]
-            app: CapState,
-            /// Unused for now
-            #[bits(4)]
-            _padding: u8,
-        }
 
         let mut caps = Caps::<MyCap>::default();
 
