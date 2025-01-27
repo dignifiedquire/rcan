@@ -24,14 +24,19 @@ impl<T: std::fmt::Debug + Sized + Serialize + DeserializeOwned + PartialEq + Eq 
     for T
 {
 }
-
-/// Returns the unix epoch seconds for the current time.
-pub fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
+/// A cap can be delgated, if we can compare it to another one
+/// `cap_a <= cap_b` means that `cap_a` is a subset or equal of `cap_b`
+/// which would allow a delegation.
+pub trait Delegatable: Capability + PartialOrd {
+    fn can_delegate_to_us(&self, other: &Self) -> bool {
+        matches!(
+            self.partial_cmp(other),
+            Some(Ordering::Less) | Some(Ordering::Equal)
+        )
+    }
 }
+
+impl<C: Capability + PartialOrd> Delegatable for C {}
 
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 #[repr(transparent)]
@@ -270,18 +275,23 @@ impl<C: Delegatable> Rcan<C> {
         // verify caps
         for (cap_root, cap) in rcan.payload.caps.iter() {
             if cap_root == &rcan.payload.issuer {
-                // simple case, issuer can issuer any cap
+                // simple case, issuer can issue any cap
             } else {
                 let mut last_parent = &rcan;
+                let mut smallest_cap = cap;
 
                 loop {
-                    if let Some(parent) = find_parent(last_parent, cap_root, cap, delegation_chain)
+                    if let Some((parent, parent_cap)) =
+                        find_parent(last_parent, cap_root, delegation_chain)
                     {
                         if &parent.payload.issuer == cap_root {
                             // we have hit the end of the chain, done
                             break;
                         } else {
                             last_parent = parent;
+                            if smallest_cap > parent_cap {
+                                smallest_cap = parent_cap;
+                            };
                         }
                     } else {
                         anyhow::bail!(
@@ -291,6 +301,9 @@ impl<C: Delegatable> Rcan<C> {
                         );
                     }
                 }
+
+                // make sure the smallest cap is enough to satisfy our cap
+                ensure!(smallest_cap.can_delegate_to_us(cap), "no valid cap found");
             }
         }
 
@@ -301,36 +314,27 @@ impl<C: Delegatable> Rcan<C> {
 fn find_parent<'a, C: Delegatable>(
     rcan: &Rcan<C>,
     cap_root: &VerifyingKey,
-    cap: &C,
     delegation_chain: &[&'a Rcan<C>],
-) -> Option<&'a Rcan<C>> {
+) -> Option<(&'a Rcan<C>, &'a C)> {
     delegation_chain
         .iter()
-        .find(|other| {
+        .filter_map(|other| {
             if other.payload.audience == rcan.payload.issuer {
-                if let Some(other_cap) = other.payload.caps.get(cap_root) {
-                    // other_cap needs to be allowed to delegate to this one
-                    return cap.can_delegate_to_us(other_cap);
-                }
+                other.payload.caps.get(cap_root).map(|c| (*other, c))
+            } else {
+                None
             }
-            false
         })
-        .copied()
+        .next()
 }
 
-/// A cap can be delgated, if we can compare it to another one
-/// `cap_a <= cap_b` means that `cap_a` is a subset or equal of `cap_b`
-/// which would allow a delegation.
-pub trait Delegatable: Capability + PartialOrd {
-    fn can_delegate_to_us(&self, other: &Self) -> bool {
-        matches!(
-            self.partial_cmp(other),
-            Some(Ordering::Less) | Some(Ordering::Equal)
-        )
-    }
+/// Returns the unix epoch seconds for the current time.
+pub fn now() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
 }
-
-impl<C: Capability + PartialOrd> Delegatable for C {}
 
 #[cfg(test)]
 mod tests {
