@@ -303,7 +303,7 @@ impl<C: Delegatable> Rcan<C> {
                 }
 
                 // make sure the smallest cap is enough to satisfy our cap
-                ensure!(smallest_cap.can_delegate_to_us(cap), "no valid cap found");
+                ensure!(cap.can_delegate_to_us(smallest_cap), "no valid cap found");
             }
         }
 
@@ -443,6 +443,7 @@ mod tests {
             .build();
 
         assert_eq!(a.partial_cmp(&b), Some(Ordering::Less));
+        assert!(a.can_delegate_to_us(&b));
 
         let mut rng = ChaCha8Rng::seed_from_u64(0);
 
@@ -516,6 +517,16 @@ mod tests {
         let decoded = Rcan::decode(&encoded).expect("failed to verify");
 
         assert_eq!(rcan, decoded);
+
+        assert!(MyCapBuilder::new()
+            .with_api(CapState::Read)
+            .build()
+            .can_delegate_to_us(&MyCapBuilder::new().with_api(CapState::Read).build()));
+
+        assert!(MyCapBuilder::new()
+            .with_api(CapState::Read)
+            .build()
+            .can_delegate_to_us(&MyCapBuilder::new().with_api(CapState::Write).build()));
     }
 
     #[test]
