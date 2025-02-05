@@ -82,18 +82,15 @@ impl Authorizer {
             );
 
             // Verify that the capability is actually reached through:
-            let Some((vk, attenuation)) = proof.payload.attenuation.as_ref() else {
-                bail!("invocation failed: proof is missing delegation",);
-            };
             ensure!(
-                vk == &self.identity,
+                proof.payload.attenuation_key() == &self.identity,
                 "invocation failed: proof is missing delegation for capability of {}",
                 hex::encode(self.identity)
             );
 
             // Verify that the capability doesn't break out of attenuations:
             ensure!(
-                capability.allowed_by_attenuation(attenuation),
+                capability.allowed_by_attenuation(proof.payload.attenuation()),
                 "invocation failed"
             );
 
@@ -131,9 +128,19 @@ pub struct Payload<A> {
     #[debug("{}", hex::encode(audience))]
     audience: VerifyingKey,
     /// Attenuation on delegated capabilities
-    attenuation: Option<(VerifyingKey, A)>,
+    attenuation: (VerifyingKey, A),
     /// Valid until unix timestamp in seconds.
     valid_until: Expires,
+}
+
+impl<A> Payload<A> {
+    pub fn attenuation(&self) -> &A {
+        &self.attenuation.1
+    }
+
+    pub fn attenuation_key(&self) -> &VerifyingKey {
+        &self.attenuation.0
+    }
 }
 
 /// When an rcan expires
@@ -150,15 +157,33 @@ pub enum Expires {
 pub struct RcanBuilder<'s, A> {
     issuer: &'s SigningKey,
     audience: VerifyingKey,
-    attenuation: Option<(VerifyingKey, A)>,
+    attenuation: (VerifyingKey, A),
 }
 
 impl<A> Rcan<A> {
-    pub fn builder(issuer: &SigningKey, audience: VerifyingKey) -> RcanBuilder<'_, A> {
+    pub fn issuing_builder(
+        issuer: &SigningKey,
+        audience: VerifyingKey,
+        attenuation: A,
+    ) -> RcanBuilder<'_, A> {
+        let att_key = issuer.verifying_key();
         RcanBuilder {
             issuer,
             audience,
-            attenuation: None,
+            attenuation: (att_key, attenuation),
+        }
+    }
+
+    pub fn delegating_builder(
+        issuer: &SigningKey,
+        audience: VerifyingKey,
+        owner: VerifyingKey,
+        attenuation: A,
+    ) -> RcanBuilder<'_, A> {
+        RcanBuilder {
+            issuer,
+            audience,
+            attenuation: (owner, attenuation),
         }
     }
 
@@ -195,23 +220,13 @@ impl<A> Rcan<A> {
         &self.payload.issuer
     }
 
-    pub fn attenuation(&self) -> Option<(&VerifyingKey, &A)> {
-        self.payload.attenuation.as_ref().map(|(v, a)| (v, a))
+    pub fn attenuation(&self) -> (&VerifyingKey, &A) {
+        let (k, a) = &self.payload.attenuation;
+        (k, a)
     }
 }
 
 impl<A> RcanBuilder<'_, A> {
-    pub fn issuing(mut self, attenuation: A) -> Self {
-        self.attenuation
-            .replace((self.issuer.verifying_key(), attenuation));
-        self
-    }
-
-    pub fn delegating(mut self, owner: VerifyingKey, attenuation: A) -> Self {
-        self.attenuation.replace((owner, attenuation));
-        self
-    }
-
     pub fn sign(self, valid_until: Expires) -> Rcan<A>
     where
         A: Serialize,
@@ -256,6 +271,7 @@ mod test {
     use super::*;
 
     #[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
+    #[repr(u8)]
     enum Rpc {
         Read = 1,
         ReadWrite = 2,
@@ -285,12 +301,28 @@ mod test {
     fn test_rcan_encoding() -> TestResult {
         let issuer = SigningKey::from_bytes(&[0u8; 32]);
         let audience = SigningKey::from_bytes(&[1u8; 32]);
-        let rcan = Rcan::builder(&issuer, audience.verifying_key())
-            .issuing(Rpc::ReadWrite)
+        let rcan = Rcan::issuing_builder(&issuer, audience.verifying_key(), Rpc::ReadWrite)
             .sign(Expires::Never);
 
         println!("{}", hex::encode(rcan.encode()));
-        assert_eq!(hex::encode(rcan.encode()), "01203b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29208a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c01203b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da290100cede73ce610c4196671a60335beca23464f06cbc9402bf1c9b7377e36453c43d2652fd2c857fab4300fa92da6ea357435c341123ef89d189884e56f58ce88206");
+
+        let expected: String = [
+            // Version
+            "01",
+            // Issuer
+            "203b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29",
+            // Audience
+            "208a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+            // Attenuation key (equal to issuer)
+            "203b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29",
+            // Attenuation
+            "0100",
+            // Signature
+            "063d18ba38e3fa41b63c35e2986bf3f4a03f655c96340c018338272466bbf65f772d58c7670c8eb57cf5210f1629a0f0058b038b5c02fc3bdc96662665d9ea0d",
+        ]
+        .join("");
+
+        assert_eq!(hex::encode(rcan.encode()), expected);
         assert_eq!(Rcan::decode(&rcan.encode())?, rcan);
         Ok(())
     }
@@ -302,13 +334,16 @@ mod test {
         let bob = SigningKey::from_bytes(&[2u8; 32]);
 
         // The service gives alice access to everything for 60 seconds
-        let service_rcan = Rcan::builder(&service, alice.verifying_key())
-            .issuing(Rpc::All)
+        let service_rcan = Rcan::issuing_builder(&service, alice.verifying_key(), Rpc::All)
             .sign(Expires::valid_for(Duration::from_secs(60)));
         // alice gives attenuated (only read access) to bob, but doesn't care for how long still
-        let friend_rcan = Rcan::builder(&alice, bob.verifying_key())
-            .delegating(service.verifying_key(), Rpc::Read)
-            .sign(Expires::Never);
+        let friend_rcan = Rcan::delegating_builder(
+            &alice,
+            bob.verifying_key(),
+            service.verifying_key(),
+            Rpc::Read,
+        )
+        .sign(Expires::Never);
         // bob can now pass the authorization test for the service
         let service_auth = Authorizer::new(service.verifying_key());
         assert!(service_auth
