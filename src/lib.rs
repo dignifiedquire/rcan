@@ -17,16 +17,13 @@ pub const VERSION: u8 = 1;
 /// An example for a type implementing this trait might be the enum
 /// for some RPC requests.
 ///
-/// Capabilities are restricted by "attenuations", which are representations
-/// of predicates on them. `allowed_by_attenuation` is what translates the
-/// predicate representation into an actual predicate.
+/// Capabilities are restricted. `allowed_by_capability` is what implements these restrictions.
 ///
-/// The `attenutation` must be serializable so it can be used in an rcan,
-/// which is signed.
-pub trait Attenuation: Serialize {
+/// The `Capability` must be serializable so it can be used in an rcan, which is signed.
+pub trait Capability: Serialize {
     /// Returns `false` this is not allowed with given
-    /// attenuation, otherwise returns `true`.
-    fn allowed_by_attenuation(&self, attenuation: &Self) -> bool;
+    /// capability, otherwise returns `true`.
+    fn allowed_by_capability(&self, capability: &Self) -> bool;
 }
 
 /// An authorizer for invocations.
@@ -52,11 +49,11 @@ impl Authorizer {
     ///
     /// Make sure to verify that the `invoker` signed and authenticated the
     /// message containing the `capability`.
-    pub fn check_invocation_from<A: Attenuation>(
+    pub fn check_invocation_from<C: Capability>(
         &self,
         invoker: VerifyingKey,
-        capability: A,
-        proof_chain: &[&Rcan<A>],
+        capability: C,
+        proof_chain: &[&Rcan<C>],
     ) -> Result<()> {
         let now = SystemTime::now().elapsed()?.as_secs();
         // We require that proof chains are provided "back-to-front".
@@ -83,14 +80,14 @@ impl Authorizer {
 
             // Verify that the capability is actually reached through:
             ensure!(
-                proof.payload.attenuation_key() == &self.identity,
+                proof.payload.capability_key() == &self.identity,
                 "invocation failed: proof is missing delegation for capability of {}",
                 hex::encode(self.identity)
             );
 
-            // Verify that the capability doesn't break out of attenuations:
+            // Verify that the capability doesn't break out of capabilitys:
             ensure!(
-                capability.allowed_by_attenuation(proof.payload.attenuation()),
+                capability.allowed_by_capability(proof.payload.capability()),
                 "invocation failed"
             );
 
@@ -112,34 +109,34 @@ impl Authorizer {
 
 /// A token for attenuated capability delegations
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
-pub struct Rcan<A> {
+pub struct Rcan<C> {
     /// The actual content.
-    pub payload: Payload<A>,
+    pub payload: Payload<C>,
     /// Signature over the serialized payload.
     pub signature: Signature,
 }
 
 #[derive(Clone, Serialize, Deserialize, derive_more::Debug, PartialEq, Eq)]
-pub struct Payload<A> {
+pub struct Payload<C> {
     /// The issuer
     #[debug("{}", hex::encode(issuer))]
     issuer: VerifyingKey,
     /// The intended audience
     #[debug("{}", hex::encode(audience))]
     audience: VerifyingKey,
-    /// Attenuation on delegated capabilities
-    attenuation: (VerifyingKey, A),
+    /// Delegated capability
+    capability: (VerifyingKey, C),
     /// Valid until unix timestamp in seconds.
     valid_until: Expires,
 }
 
-impl<A> Payload<A> {
-    pub fn attenuation(&self) -> &A {
-        &self.attenuation.1
+impl<C> Payload<C> {
+    pub fn capability(&self) -> &C {
+        &self.capability.1
     }
 
-    pub fn attenuation_key(&self) -> &VerifyingKey {
-        &self.attenuation.0
+    pub fn capability_key(&self) -> &VerifyingKey {
+        &self.capability.0
     }
 }
 
@@ -154,23 +151,23 @@ pub enum Expires {
     At(u64),
 }
 
-pub struct RcanBuilder<'s, A> {
+pub struct RcanBuilder<'s, C> {
     issuer: &'s SigningKey,
     audience: VerifyingKey,
-    attenuation: (VerifyingKey, A),
+    capability: (VerifyingKey, C),
 }
 
-impl<A> Rcan<A> {
+impl<C> Rcan<C> {
     pub fn issuing_builder(
         issuer: &SigningKey,
         audience: VerifyingKey,
-        attenuation: A,
-    ) -> RcanBuilder<'_, A> {
+        capability: C,
+    ) -> RcanBuilder<'_, C> {
         let att_key = issuer.verifying_key();
         RcanBuilder {
             issuer,
             audience,
-            attenuation: (att_key, attenuation),
+            capability: (att_key, capability),
         }
     }
 
@@ -178,25 +175,25 @@ impl<A> Rcan<A> {
         issuer: &SigningKey,
         audience: VerifyingKey,
         owner: VerifyingKey,
-        attenuation: A,
-    ) -> RcanBuilder<'_, A> {
+        capability: C,
+    ) -> RcanBuilder<'_, C> {
         RcanBuilder {
             issuer,
             audience,
-            attenuation: (owner, attenuation),
+            capability: (owner, capability),
         }
     }
 
     pub fn encode(&self) -> Vec<u8>
     where
-        A: Serialize,
+        C: Serialize,
     {
         postcard::to_extend(&self, vec![VERSION]).expect("vec")
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self>
     where
-        A: DeserializeOwned,
+        C: DeserializeOwned,
     {
         let Some(version) = bytes.first() else {
             bail!("cannot decode, token is empty");
@@ -220,21 +217,24 @@ impl<A> Rcan<A> {
         &self.payload.issuer
     }
 
-    pub fn attenuation(&self) -> (&VerifyingKey, &A) {
-        let (k, a) = &self.payload.attenuation;
-        (k, a)
+    pub fn capability(&self) -> &C {
+        self.payload.capability()
+    }
+
+    pub fn capability_key(&self) -> &VerifyingKey {
+        self.payload.capability_key()
     }
 }
 
-impl<A> RcanBuilder<'_, A> {
-    pub fn sign(self, valid_until: Expires) -> Rcan<A>
+impl<C> RcanBuilder<'_, C> {
+    pub fn sign(self, valid_until: Expires) -> Rcan<C>
     where
-        A: Serialize,
+        C: Serialize,
     {
         let payload = Payload {
             issuer: self.issuer.verifying_key(),
             audience: self.audience,
-            attenuation: self.attenuation,
+            capability: self.capability,
             valid_until,
         };
 
@@ -279,9 +279,9 @@ mod test {
         All = 0,
     }
 
-    impl Attenuation for Rpc {
-        fn allowed_by_attenuation(&self, attenuation: &Self) -> bool {
-            match (attenuation, self) {
+    impl Capability for Rpc {
+        fn allowed_by_capability(&self, capability: &Self) -> bool {
+            match (capability, self) {
                 (Rpc::Read, Rpc::Read) => true,
                 (Rpc::Read, _) => false,
                 (Rpc::ReadWrite, _) => true, // all operations are allowed by read-write in the current system
@@ -291,10 +291,10 @@ mod test {
     }
 
     #[test]
-    fn test_simple_attenuations() {
-        assert!(Rpc::Read.allowed_by_attenuation(&Rpc::Read));
-        assert!(!Rpc::ReadWrite.allowed_by_attenuation(&Rpc::Read),);
-        assert!(Rpc::ReadWrite.allowed_by_attenuation(&Rpc::ReadWrite),);
+    fn test_simple_capabilitys() {
+        assert!(Rpc::Read.allowed_by_capability(&Rpc::Read));
+        assert!(!Rpc::ReadWrite.allowed_by_capability(&Rpc::Read),);
+        assert!(Rpc::ReadWrite.allowed_by_capability(&Rpc::ReadWrite),);
     }
 
     #[test]
@@ -313,9 +313,9 @@ mod test {
             "203b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29",
             // Audience
             "208a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
-            // Attenuation key (equal to issuer)
+            // Capability key (equal to issuer)
             "203b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29",
-            // Attenuation
+            // Capability
             "0100",
             // Signature
             "063d18ba38e3fa41b63c35e2986bf3f4a03f655c96340c018338272466bbf65f772d58c7670c8eb57cf5210f1629a0f0058b038b5c02fc3bdc96662665d9ea0d",
