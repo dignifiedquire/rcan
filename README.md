@@ -1,3 +1,3 @@
 # RCANs
 
-> Really simple Controlled Authorization Networks
+> Really simple user Controlled Authorization Networks
