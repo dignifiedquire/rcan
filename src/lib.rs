@@ -17,13 +17,13 @@ pub const VERSION: u8 = 1;
 /// An example for a type implementing this trait might be the enum
 /// for some RPC requests.
 ///
-/// Capabilities are restricted. `allowed_by_capability` is what implements these restrictions.
+/// Capabilities are restricted. `can_delegate` is what implements these restrictions.
 ///
 /// The `Capability` must be serializable so it can be used in an rcan, which is signed.
 pub trait Capability: Serialize {
     /// Returns `false` this is not allowed with given
     /// capability, otherwise returns `true`.
-    fn allowed_by_capability(&self, capability: &Self) -> bool;
+    fn can_delegate(&self, capability: &Self) -> bool;
 }
 
 /// An authorizer for invocations.
@@ -87,7 +87,7 @@ impl Authorizer {
 
             // Verify that the capability doesn't break out of capabilitys:
             ensure!(
-                capability.allowed_by_capability(proof.payload.capability()),
+                capability.can_delegate(proof.payload.capability()),
                 "invocation failed"
             );
 
@@ -280,7 +280,7 @@ mod test {
     }
 
     impl Capability for Rpc {
-        fn allowed_by_capability(&self, capability: &Self) -> bool {
+        fn can_delegate(&self, capability: &Self) -> bool {
             match (capability, self) {
                 (Rpc::Read, Rpc::Read) => true,
                 (Rpc::Read, _) => false,
@@ -292,9 +292,9 @@ mod test {
 
     #[test]
     fn test_simple_capabilitys() {
-        assert!(Rpc::Read.allowed_by_capability(&Rpc::Read));
-        assert!(!Rpc::ReadWrite.allowed_by_capability(&Rpc::Read),);
-        assert!(Rpc::ReadWrite.allowed_by_capability(&Rpc::ReadWrite),);
+        assert!(Rpc::Read.can_delegate(&Rpc::Read));
+        assert!(!Rpc::ReadWrite.can_delegate(&Rpc::Read),);
+        assert!(Rpc::ReadWrite.can_delegate(&Rpc::ReadWrite),);
     }
 
     #[test]
