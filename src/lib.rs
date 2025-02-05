@@ -184,6 +184,18 @@ impl<A> Rcan<A> {
 
         Ok(rcan)
     }
+
+    pub fn audience(&self) -> &VerifyingKey {
+        &self.payload.audience
+    }
+
+    pub fn issuer(&self) -> &VerifyingKey {
+        &self.payload.issuer
+    }
+
+    pub fn attenuation(&self) -> Option<(&VerifyingKey, &A)> {
+        self.payload.attenuation.as_ref().map(|(v, a)| (v, a))
+    }
 }
 
 impl<A> RcanBuilder<'_, A> {
