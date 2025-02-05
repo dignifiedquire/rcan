@@ -84,7 +84,7 @@ impl Authorizer {
                 bail!("invocation failed: proof is missing delegation",);
             };
             ensure!(
-                vk.0 == self.identity,
+                vk == &self.identity,
                 "invocation failed: proof is missing delegation for capability of {}",
                 hex::encode(self.identity)
             );
@@ -129,7 +129,7 @@ pub struct Payload<A> {
     #[debug("{}", hex::encode(audience))]
     audience: VerifyingKey,
     /// Attenuation on delegated capabilities
-    attenuation: Option<(VerifyingKeyWrapper, A)>,
+    attenuation: Option<(VerifyingKey, A)>,
     /// Valid until unix timestamp in seconds.
     valid_until: Expires,
 }
@@ -148,7 +148,7 @@ pub enum Expires {
 pub struct RcanBuilder<'s, A> {
     issuer: &'s SigningKey,
     audience: VerifyingKey,
-    attenuation: Option<(VerifyingKeyWrapper, A)>,
+    attenuation: Option<(VerifyingKey, A)>,
 }
 
 impl<A> Rcan<A> {
@@ -171,7 +171,7 @@ impl<A> Rcan<A> {
     where
         A: DeserializeOwned,
     {
-        let Some(version) = bytes.get(0) else {
+        let Some(version) = bytes.first() else {
             bail!("cannot decode, token is empty");
         };
         ensure!(*version == VERSION, "invalid version: {}", version);
@@ -180,9 +180,7 @@ impl<A> Rcan<A> {
 
         // Verify the signature
         let signed = &bytes[..bytes.len() - SIGNATURE_LENGTH]; // make sure to sign the version, too
-        rcan.payload
-            .issuer
-            .verify_strict(&signed, &rcan.signature)?;
+        rcan.payload.issuer.verify_strict(signed, &rcan.signature)?;
 
         Ok(rcan)
     }
@@ -190,16 +188,13 @@ impl<A> Rcan<A> {
 
 impl<A> RcanBuilder<'_, A> {
     pub fn issuing(mut self, attenuation: A) -> Self {
-        self.attenuation.replace((
-            VerifyingKeyWrapper(self.issuer.verifying_key()),
-            attenuation,
-        ));
+        self.attenuation
+            .replace((self.issuer.verifying_key(), attenuation));
         self
     }
 
     pub fn delegating(mut self, owner: VerifyingKey, attenuation: A) -> Self {
-        self.attenuation
-            .replace((VerifyingKeyWrapper(owner), attenuation));
+        self.attenuation.replace((owner, attenuation));
         self
     }
 
@@ -237,25 +232,6 @@ impl Expires {
             Expires::Never => true,
             Expires::At(expiry) => *expiry >= time,
         }
-    }
-}
-
-// Private stuff
-
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Default, derive_more::Debug)]
-#[repr(transparent)]
-#[debug("{}", hex::encode(_0))]
-struct VerifyingKeyWrapper(VerifyingKey);
-
-impl PartialOrd for VerifyingKeyWrapper {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for VerifyingKeyWrapper {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0.as_bytes().cmp(other.0.as_bytes())
     }
 }
 
