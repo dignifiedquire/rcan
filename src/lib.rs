@@ -1,12 +1,14 @@
-use std::ops::Add;
-use std::time::{Duration, SystemTime};
+use std::{
+    ops::Add,
+    time::{Duration, SystemTime},
+};
 
 // TODO: better error management
 use anyhow::{bail, ensure, Context, Result};
-use ed25519_dalek::ed25519::signature::Signer;
-use ed25519_dalek::{Signature, SigningKey, VerifyingKey, SIGNATURE_LENGTH};
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
+use ed25519_dalek::{
+    ed25519::signature::Signer, Signature, SigningKey, VerifyingKey, SIGNATURE_LENGTH,
+};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 pub const VERSION: u8 = 1;
 
