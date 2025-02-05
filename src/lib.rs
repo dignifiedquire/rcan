@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::ops::Add;
 use std::time::{Duration, SystemTime};
 
@@ -81,16 +80,14 @@ impl Authorizer {
             );
 
             // Verify that the capability is actually reached through:
-            let Some(attenuation) = proof
-                .payload
-                .attenuations
-                .get(&VerifyingKeyWrapper(self.identity))
-            else {
-                bail!(
-                    "invocation failed: proof is missing delegation for capability of {}",
-                    hex::encode(self.identity)
-                );
+            let Some((vk, attenuation)) = proof.payload.attenuation.as_ref() else {
+                bail!("invocation failed: proof is missing delegation",);
             };
+            ensure!(
+                vk.0 == self.identity,
+                "invocation failed: proof is missing delegation for capability of {}",
+                hex::encode(self.identity)
+            );
 
             // Verify that the capability doesn't break out of attenuations:
             ensure!(
@@ -131,8 +128,8 @@ pub struct Payload<A> {
     /// The intended audience
     #[debug("{}", hex::encode(audience))]
     audience: VerifyingKey,
-    /// Attenuations on delegated capabilities
-    attenuations: BTreeMap<VerifyingKeyWrapper, A>,
+    /// Attenuation on delegated capabilities
+    attenuation: Option<(VerifyingKeyWrapper, A)>,
     /// Valid until unix timestamp in seconds.
     valid_until: Expires,
 }
@@ -151,7 +148,7 @@ pub enum Expires {
 pub struct RcanBuilder<'s, A> {
     issuer: &'s SigningKey,
     audience: VerifyingKey,
-    attenuations: BTreeMap<VerifyingKeyWrapper, A>,
+    attenuation: Option<(VerifyingKeyWrapper, A)>,
 }
 
 impl<A> Rcan<A> {
@@ -159,7 +156,7 @@ impl<A> Rcan<A> {
         RcanBuilder {
             issuer,
             audience,
-            attenuations: Default::default(),
+            attenuation: None,
         }
     }
 
@@ -193,16 +190,16 @@ impl<A> Rcan<A> {
 
 impl<A> RcanBuilder<'_, A> {
     pub fn issuing(mut self, attenuation: A) -> Self {
-        self.attenuations.insert(
+        self.attenuation.replace((
             VerifyingKeyWrapper(self.issuer.verifying_key()),
             attenuation,
-        );
+        ));
         self
     }
 
     pub fn delegating(mut self, owner: VerifyingKey, attenuation: A) -> Self {
-        self.attenuations
-            .insert(VerifyingKeyWrapper(owner), attenuation);
+        self.attenuation
+            .replace((VerifyingKeyWrapper(owner), attenuation));
         self
     }
 
@@ -213,7 +210,7 @@ impl<A> RcanBuilder<'_, A> {
         let payload = Payload {
             issuer: self.issuer.verifying_key(),
             audience: self.audience,
-            attenuations: self.attenuations,
+            attenuation: self.attenuation,
             valid_until,
         };
 
