@@ -79,11 +79,22 @@ impl Authorizer {
             );
 
             // Verify that the capability is actually reached through:
-            ensure!(
-                proof.payload.capability_key() == &self.identity,
-                "invocation failed: proof is missing delegation for capability of {}",
-                hex::encode(self.identity)
-            );
+            match proof.payload.capability_origin() {
+                CapabilityOrigin::Issuer => {
+                    ensure!(
+                        proof.issuer() == &self.identity,
+                        "invocation failed: proof is missing delegation for capability of {}",
+                        hex::encode(self.identity)
+                    );
+                }
+                CapabilityOrigin::Delegation(ref root) => {
+                    ensure!(
+                        root == &self.identity,
+                        "invocation failed: proof is missing delegation for capability of {}",
+                        hex::encode(self.identity)
+                    );
+                }
+            }
 
             // Verify that the capability doesn't break out of capabilitys:
             ensure!(
@@ -124,20 +135,31 @@ pub struct Payload<C> {
     /// The intended audience
     #[debug("{}", hex::encode(audience))]
     audience: VerifyingKey,
-    /// Delegated capability
-    capability: (VerifyingKey, C),
+    /// The origin of the capability
+    capability_origin: CapabilityOrigin,
+    /// The capability
+    capability: C,
     /// Valid until unix timestamp in seconds.
     valid_until: Expires,
 }
 
 impl<C> Payload<C> {
     pub fn capability(&self) -> &C {
-        &self.capability.1
+        &self.capability
     }
 
-    pub fn capability_key(&self) -> &VerifyingKey {
-        &self.capability.0
+    pub fn capability_origin(&self) -> &CapabilityOrigin {
+        &self.capability_origin
     }
+}
+
+/// The potential origins of a capability.
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub enum CapabilityOrigin {
+    /// The origin is the issuer itself
+    Issuer,
+    /// This is a delegation, with this key being the root of the delegation chain.
+    Delegation(VerifyingKey),
 }
 
 /// When an rcan expires
@@ -154,7 +176,8 @@ pub enum Expires {
 pub struct RcanBuilder<'s, C> {
     issuer: &'s SigningKey,
     audience: VerifyingKey,
-    capability: (VerifyingKey, C),
+    capability_origin: CapabilityOrigin,
+    capability: C,
 }
 
 impl<C> Rcan<C> {
@@ -163,11 +186,11 @@ impl<C> Rcan<C> {
         audience: VerifyingKey,
         capability: C,
     ) -> RcanBuilder<'_, C> {
-        let att_key = issuer.verifying_key();
         RcanBuilder {
             issuer,
             audience,
-            capability: (att_key, capability),
+            capability_origin: CapabilityOrigin::Issuer,
+            capability,
         }
     }
 
@@ -180,7 +203,8 @@ impl<C> Rcan<C> {
         RcanBuilder {
             issuer,
             audience,
-            capability: (owner, capability),
+            capability_origin: CapabilityOrigin::Delegation(owner),
+            capability,
         }
     }
 
@@ -221,8 +245,8 @@ impl<C> Rcan<C> {
         self.payload.capability()
     }
 
-    pub fn capability_key(&self) -> &VerifyingKey {
-        self.payload.capability_key()
+    pub fn capability_origin(&self) -> &CapabilityOrigin {
+        self.payload.capability_origin()
     }
 }
 
@@ -234,6 +258,7 @@ impl<C> RcanBuilder<'_, C> {
         let payload = Payload {
             issuer: self.issuer.verifying_key(),
             audience: self.audience,
+            capability_origin: self.capability_origin,
             capability: self.capability,
             valid_until,
         };
@@ -313,12 +338,12 @@ mod test {
             "203b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29",
             // Audience
             "208a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
-            // Capability key (equal to issuer)
-            "203b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29",
+            // Issuer
+            "00",
             // Capability
             "0100",
             // Signature
-            "063d18ba38e3fa41b63c35e2986bf3f4a03f655c96340c018338272466bbf65f772d58c7670c8eb57cf5210f1629a0f0058b038b5c02fc3bdc96662665d9ea0d",
+            "057184ff2f7c50138855ab68ea734a55469eb2a04b3e9422b43a20f43fb41d4f6dd30463167a6210a90a36c9de2b5b3eb62735614aa028656a566d1de7310e0c",
         ]
         .join("");
 
