@@ -12,6 +12,9 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 pub const VERSION: u8 = 1;
 
+/// Domain seperation tag
+pub const DST: &[u8] = b"rcan-1-delegation";
+
 /// We allow arbitrary capabilities.
 ///
 /// An example for a type implementing this trait might be the enum
@@ -201,7 +204,7 @@ impl<C> Rcan<C> {
     where
         C: Serialize,
     {
-        postcard::to_extend(&self, vec![VERSION]).expect("vec")
+        postcard::to_extend(self, vec![VERSION]).expect("vec")
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self>
@@ -212,12 +215,14 @@ impl<C> Rcan<C> {
             bail!("cannot decode, token is empty");
         };
         ensure!(*version == VERSION, "invalid version: {}", version);
-
         let rcan: Self = postcard::from_bytes(&bytes[1..]).context("decoding")?;
 
         // Verify the signature
-        let signed = &bytes[..bytes.len() - SIGNATURE_LENGTH]; // make sure to sign the version, too
-        rcan.payload.issuer.verify_strict(signed, &rcan.signature)?;
+        let mut signed = DST.to_vec();
+        signed.extend_from_slice(&bytes[1..bytes.len() - SIGNATURE_LENGTH]);
+        rcan.payload
+            .issuer
+            .verify_strict(&signed, &rcan.signature)?;
 
         Ok(rcan)
     }
@@ -259,7 +264,7 @@ impl<C> RcanBuilder<'_, C> {
             valid_until,
         };
 
-        let to_sign = postcard::to_extend(&payload, vec![VERSION]).expect("vec");
+        let to_sign = postcard::to_extend(&payload, DST.to_vec()).expect("vec");
         let signature = self.issuer.sign(&to_sign);
 
         Rcan { signature, payload }
@@ -339,7 +344,7 @@ mod test {
             // Capability
             "0100",
             // Signature
-            "057184ff2f7c50138855ab68ea734a55469eb2a04b3e9422b43a20f43fb41d4f6dd30463167a6210a90a36c9de2b5b3eb62735614aa028656a566d1de7310e0c",
+            "54675ed0b6ba3a830fe24ec8523f776fa43001edfe4cc9e3bd639009a2058b1805de5e05958b46c03b423ed5d1c72acaab48a9f3bf8db2402c82295f085df404",
         ]
         .join("");
 
