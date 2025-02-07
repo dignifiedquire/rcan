@@ -12,6 +12,9 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 pub const VERSION: u8 = 1;
 
+/// Domain seperation tag
+pub const DST: &[u8] = b"rcan-1-delegation";
+
 /// We allow arbitrary capabilities.
 ///
 /// An example for a type implementing this trait might be the enum
@@ -80,7 +83,7 @@ impl Authorizer {
 
             // Verify that the capability is actually reached through:
             ensure!(
-                proof.payload.capability_key() == &self.identity,
+                proof.capability_issuer() == &self.identity,
                 "invocation failed: proof is missing delegation for capability of {}",
                 hex::encode(self.identity)
             );
@@ -97,11 +100,11 @@ impl Authorizer {
         }
 
         ensure!(
-        &invoker == current_issuer_target,
-        "invocation failed: expected delegation chain to end in the connection's owner {}, but the connection is authenticated by {} instead",
-        hex::encode(invoker),
-        hex::encode(current_issuer_target),
-    );
+            &invoker == current_issuer_target,
+            "invocation failed: expected delegation chain to end in the connection's owner {}, but the connection is authenticated by {} instead",
+            hex::encode(invoker),
+            hex::encode(current_issuer_target),
+        );
 
         Ok(())
     }
@@ -124,20 +127,31 @@ pub struct Payload<C> {
     /// The intended audience
     #[debug("{}", hex::encode(audience))]
     audience: VerifyingKey,
-    /// Delegated capability
-    capability: (VerifyingKey, C),
+    /// The origin of the capability
+    capability_origin: CapabilityOrigin,
+    /// The capability
+    capability: C,
     /// Valid until unix timestamp in seconds.
     valid_until: Expires,
 }
 
 impl<C> Payload<C> {
     pub fn capability(&self) -> &C {
-        &self.capability.1
+        &self.capability
     }
 
-    pub fn capability_key(&self) -> &VerifyingKey {
-        &self.capability.0
+    pub fn capability_origin(&self) -> &CapabilityOrigin {
+        &self.capability_origin
     }
+}
+
+/// The potential origins of a capability.
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub enum CapabilityOrigin {
+    /// The origin is the issuer itself
+    Issuer,
+    /// This is a delegation, with this key being the root of the delegation chain.
+    Delegation(VerifyingKey),
 }
 
 /// When an rcan expires
@@ -154,7 +168,8 @@ pub enum Expires {
 pub struct RcanBuilder<'s, C> {
     issuer: &'s SigningKey,
     audience: VerifyingKey,
-    capability: (VerifyingKey, C),
+    capability_origin: CapabilityOrigin,
+    capability: C,
 }
 
 impl<C> Rcan<C> {
@@ -163,11 +178,11 @@ impl<C> Rcan<C> {
         audience: VerifyingKey,
         capability: C,
     ) -> RcanBuilder<'_, C> {
-        let att_key = issuer.verifying_key();
         RcanBuilder {
             issuer,
             audience,
-            capability: (att_key, capability),
+            capability_origin: CapabilityOrigin::Issuer,
+            capability,
         }
     }
 
@@ -180,7 +195,8 @@ impl<C> Rcan<C> {
         RcanBuilder {
             issuer,
             audience,
-            capability: (owner, capability),
+            capability_origin: CapabilityOrigin::Delegation(owner),
+            capability,
         }
     }
 
@@ -188,7 +204,7 @@ impl<C> Rcan<C> {
     where
         C: Serialize,
     {
-        postcard::to_extend(&self, vec![VERSION]).expect("vec")
+        postcard::to_extend(self, vec![VERSION]).expect("vec")
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self>
@@ -199,12 +215,14 @@ impl<C> Rcan<C> {
             bail!("cannot decode, token is empty");
         };
         ensure!(*version == VERSION, "invalid version: {}", version);
-
         let rcan: Self = postcard::from_bytes(&bytes[1..]).context("decoding")?;
 
         // Verify the signature
-        let signed = &bytes[..bytes.len() - SIGNATURE_LENGTH]; // make sure to sign the version, too
-        rcan.payload.issuer.verify_strict(signed, &rcan.signature)?;
+        let mut signed = DST.to_vec();
+        signed.extend_from_slice(&bytes[1..bytes.len() - SIGNATURE_LENGTH]);
+        rcan.payload
+            .issuer
+            .verify_strict(&signed, &rcan.signature)?;
 
         Ok(rcan)
     }
@@ -221,8 +239,15 @@ impl<C> Rcan<C> {
         self.payload.capability()
     }
 
-    pub fn capability_key(&self) -> &VerifyingKey {
-        self.payload.capability_key()
+    pub fn capability_origin(&self) -> &CapabilityOrigin {
+        self.payload.capability_origin()
+    }
+
+    pub fn capability_issuer(&self) -> &VerifyingKey {
+        match self.payload.capability_origin() {
+            CapabilityOrigin::Issuer => &self.payload.issuer,
+            CapabilityOrigin::Delegation(ref root) => root,
+        }
     }
 }
 
@@ -234,11 +259,12 @@ impl<C> RcanBuilder<'_, C> {
         let payload = Payload {
             issuer: self.issuer.verifying_key(),
             audience: self.audience,
+            capability_origin: self.capability_origin,
             capability: self.capability,
             valid_until,
         };
 
-        let to_sign = postcard::to_extend(&payload, vec![VERSION]).expect("vec");
+        let to_sign = postcard::to_extend(&payload, DST.to_vec()).expect("vec");
         let signature = self.issuer.sign(&to_sign);
 
         Rcan { signature, payload }
@@ -313,12 +339,12 @@ mod test {
             "203b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29",
             // Audience
             "208a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
-            // Capability key (equal to issuer)
-            "203b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29",
+            // Capability Origin: Issuer
+            "00",
             // Capability
             "0100",
             // Signature
-            "063d18ba38e3fa41b63c35e2986bf3f4a03f655c96340c018338272466bbf65f772d58c7670c8eb57cf5210f1629a0f0058b038b5c02fc3bdc96662665d9ea0d",
+            "54675ed0b6ba3a830fe24ec8523f776fa43001edfe4cc9e3bd639009a2058b1805de5e05958b46c03b423ed5d1c72acaab48a9f3bf8db2402c82295f085df404",
         ]
         .join("");
 
