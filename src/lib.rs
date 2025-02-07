@@ -79,22 +79,11 @@ impl Authorizer {
             );
 
             // Verify that the capability is actually reached through:
-            match proof.payload.capability_origin() {
-                CapabilityOrigin::Issuer => {
-                    ensure!(
-                        proof.issuer() == &self.identity,
-                        "invocation failed: proof is missing delegation for capability of {}",
-                        hex::encode(self.identity)
-                    );
-                }
-                CapabilityOrigin::Delegation(ref root) => {
-                    ensure!(
-                        root == &self.identity,
-                        "invocation failed: proof is missing delegation for capability of {}",
-                        hex::encode(self.identity)
-                    );
-                }
-            }
+            ensure!(
+                proof.capability_issuer() == &self.identity,
+                "invocation failed: proof is missing delegation for capability of {}",
+                hex::encode(self.identity)
+            );
 
             // Verify that the capability doesn't break out of capabilitys:
             ensure!(
@@ -108,11 +97,11 @@ impl Authorizer {
         }
 
         ensure!(
-        &invoker == current_issuer_target,
-        "invocation failed: expected delegation chain to end in the connection's owner {}, but the connection is authenticated by {} instead",
-        hex::encode(invoker),
-        hex::encode(current_issuer_target),
-    );
+            &invoker == current_issuer_target,
+            "invocation failed: expected delegation chain to end in the connection's owner {}, but the connection is authenticated by {} instead",
+            hex::encode(invoker),
+            hex::encode(current_issuer_target),
+        );
 
         Ok(())
     }
@@ -248,6 +237,13 @@ impl<C> Rcan<C> {
     pub fn capability_origin(&self) -> &CapabilityOrigin {
         self.payload.capability_origin()
     }
+
+    pub fn capability_issuer(&self) -> &VerifyingKey {
+        match self.payload.capability_origin() {
+            CapabilityOrigin::Issuer => &self.payload.issuer,
+            CapabilityOrigin::Delegation(ref root) => root,
+        }
+    }
 }
 
 impl<C> RcanBuilder<'_, C> {
@@ -338,7 +334,7 @@ mod test {
             "203b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29",
             // Audience
             "208a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
-            // Issuer
+            // Capability Origin: Issuer
             "00",
             // Capability
             "0100",
