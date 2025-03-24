@@ -1,6 +1,6 @@
 use std::{
     ops::Add,
-    time::{Duration, SystemTime},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 // TODO: better error management
@@ -58,7 +58,7 @@ impl Authorizer {
         capability: C,
         proof_chain: &[&Rcan<C>],
     ) -> Result<()> {
-        let now = SystemTime::now().elapsed()?.as_secs();
+        let now = SystemTime::now();
         // We require that proof chains are provided "back-to-front".
         // So they start with the owner of the capability, then
         // proceed with the next item in the chain.
@@ -249,6 +249,10 @@ impl<C> Rcan<C> {
             CapabilityOrigin::Delegation(ref root) => root,
         }
     }
+
+    pub fn expires(&self) -> &Expires {
+        &self.payload.valid_until
+    }
 }
 
 impl<C> RcanBuilder<'_, C> {
@@ -275,14 +279,18 @@ impl Expires {
     pub fn valid_for(duration: Duration) -> Self {
         Self::At(
             SystemTime::now()
-                .elapsed()
+                .duration_since(UNIX_EPOCH)
                 .expect("now is after UNIX_EPOCH")
                 .add(duration)
                 .as_secs(),
         )
     }
 
-    pub fn is_valid_at(&self, time: u64) -> bool {
+    pub fn is_valid_at(&self, time: SystemTime) -> bool {
+        let time = time
+            .duration_since(UNIX_EPOCH)
+            .expect("time must be after UNIX_EPOCH")
+            .as_secs();
         match self {
             Expires::Never => true,
             Expires::At(expiry) => *expiry >= time,
