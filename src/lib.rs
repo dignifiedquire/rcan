@@ -399,4 +399,17 @@ mod test {
 
         Ok(())
     }
+
+    #[test]
+    fn test_expiry() {
+        let issuer = SigningKey::from_bytes(&[0u8; 32]);
+        let audience = SigningKey::from_bytes(&[1u8; 32]).verifying_key();
+        let rcan = Rcan::issuing_builder(&issuer, audience, Rpc::All)
+            .sign(Expires::valid_for(Duration::from_secs(60)));
+        assert!(rcan.expires().is_valid_at(UNIX_EPOCH));
+        let now = SystemTime::now();
+        assert!(rcan.expires().is_valid_at(now));
+        let future = now + Duration::from_secs(61);
+        assert!(!rcan.expires().is_valid_at(future));
+    }
 }
