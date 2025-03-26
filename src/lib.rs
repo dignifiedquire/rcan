@@ -10,6 +10,10 @@ use ed25519_dalek::{
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
+pub mod chain;
+#[cfg(feature = "pem")]
+pub mod pem;
+
 pub const VERSION: u8 = 1;
 
 /// Domain seperation tag
@@ -56,21 +60,21 @@ impl Authorizer {
     ///
     /// Make sure to verify that the `invoker` signed and authenticated the
     /// message containing the `capability`.
-    pub fn check_invocation_from<C: Capability>(
-        &self,
+    pub fn check_invocation_from<'a, C: Capability + 'a>(
+        &'a self,
         invoker: VerifyingKey,
-        capability: C,
-        proof_chain: &[&Rcan<C>],
+        capability: &'a C,
+        proof_chain: impl IntoIterator<Item = &'a Rcan<C>>,
     ) -> Result<()> {
         let now = SystemTime::now();
         // We require that proof chains are provided "back-to-front".
         // So they start with the owner of the capability, then
         // proceed with the next item in the chain.
-        let mut current_issuer_target = &self.identity;
+        let mut current_issuer_target = self.identity;
         for proof in proof_chain {
             // Verify proof chain issuer/audience integrity:
-            let issuer = &proof.payload.issuer;
-            let audience = &proof.payload.audience;
+            let issuer = proof.payload.issuer;
+            let audience = proof.payload.audience;
             ensure!(
                 issuer == current_issuer_target,
                 "invocation failed: expected proof to be issued by {}, but was issued by {}",
@@ -104,7 +108,7 @@ impl Authorizer {
         }
 
         ensure!(
-            &invoker == current_issuer_target,
+            invoker == current_issuer_target,
             "invocation failed: expected delegation chain to end in the connection's owner {}, but the connection is authenticated by {} instead",
             hex::encode(invoker),
             hex::encode(current_issuer_target),
@@ -211,6 +215,13 @@ impl<C> Rcan<C> {
         postcard::to_extend(self, vec![VERSION]).expect("vec")
     }
 
+    pub fn encoded_len(&self) -> usize
+    where
+        C: Serialize,
+    {
+        postcard::experimental::serialized_size(self).unwrap() + 1
+    }
+
     pub fn decode(bytes: &[u8]) -> Result<Self>
     where
         C: DeserializeOwned,
@@ -308,7 +319,7 @@ mod test {
 
     use super::*;
 
-    #[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
+    #[derive(Serialize, Deserialize, PartialEq, Eq, Debug, Clone)]
     enum Rpc {
         Read,
         ReadWrite,
@@ -397,8 +408,8 @@ mod test {
         assert!(service_auth
             .check_invocation_from(
                 bob.verifying_key(),
-                Rpc::Read,
-                &[&service_rcan, &friend_rcan],
+                &Rpc::Read,
+                [&service_rcan, &friend_rcan]
             )
             .is_ok());
 
@@ -406,8 +417,8 @@ mod test {
         assert!(service_auth
             .check_invocation_from(
                 bob.verifying_key(),
-                Rpc::ReadWrite,
-                &[&service_rcan, &friend_rcan]
+                &Rpc::ReadWrite,
+                [&service_rcan, &friend_rcan]
             )
             .is_err());
 

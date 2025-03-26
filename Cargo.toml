@@ -19,8 +19,15 @@ hex = "0.4.3"
 postcard = { version = "1.1.1", features = ["use-std"] }
 rand = "0.8.5"
 serde = { version = "1.0.217", features = ["derive"] }
+ssh-encoding = { version = "0.2.0", features = ["pem", "std"], optional = true }
+tokio = { version = "1", optional = true, features = ["fs"] }
 
 [dev-dependencies]
 bitfields = "0.12.4"
 rand_chacha = "0.3.1"
 testresult = "0.4.1"
+
+[features]
+default = []
+fs = ["pem", "dep:tokio"]
+pem = ["dep:ssh-encoding"]
