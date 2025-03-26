@@ -15,18 +15,22 @@ pub const VERSION: u8 = 1;
 /// Domain seperation tag
 pub const DST: &[u8] = b"rcan-1-delegation";
 
-/// We allow arbitrary capabilities.
+/// A trait for types that define a capability.
 ///
-/// An example for a type implementing this trait might be the enum
-/// for some RPC requests.
+/// Capabilities can be compared using [`Capability::permits`], which determines
+/// whether one capability grants permission to perform another.
 ///
-/// Capabilities are restricted. `can_delegate` is what implements these restrictions.
+/// A common implementation of this trait might be an enum representing different
+/// RPC request types.
 ///
-/// The `Capability` must be serializable so it can be used in an rcan, which is signed.
+/// The `Capability` type must be serializable so it can be included in the signature
+/// payload in an [`Rcan`].
 pub trait Capability: Serialize {
-    /// Returns `false` this is not allowed with given
-    /// capability, otherwise returns `true`.
-    fn can_delegate(&self, capability: &Self) -> bool;
+    /// Determines if `self` permits `other`.
+    ///
+    /// Returns `true` if `self` grants permission to perform the `other` capability,
+    /// otherwise returns `false`.
+    fn permits(&self, other: &Self) -> bool;
 }
 
 /// An authorizer for invocations.
@@ -90,7 +94,7 @@ impl Authorizer {
 
             // Verify that the capability doesn't break out of capabilitys:
             ensure!(
-                capability.can_delegate(proof.payload.capability()),
+                proof.payload.capability().permits(&capability),
                 "invocation failed"
             );
 
@@ -305,30 +309,38 @@ mod test {
     use super::*;
 
     #[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
-    #[repr(u8)]
     enum Rpc {
-        Read = 1,
-        ReadWrite = 2,
+        Read,
+        ReadWrite,
         /// Read, ReadWrite, and any "future ones" that we might not have thought of yet.
-        All = 0,
+        All,
     }
 
     impl Capability for Rpc {
-        fn can_delegate(&self, capability: &Self) -> bool {
-            match (capability, self) {
+        fn permits(&self, other: &Self) -> bool {
+            match (self, other) {
+                // `All` permits all RPC operations, by definition
+                (Rpc::All, _) => true,
+                // `ReadWrite` permits `Read` and `ReadWrite`, but not `All` (which may be extended later to include more caps)
+                (Rpc::ReadWrite, Rpc::ReadWrite | Rpc::Read) => true,
+                (Rpc::ReadWrite, _) => false,
+                // `Read` only permits `Read`
                 (Rpc::Read, Rpc::Read) => true,
                 (Rpc::Read, _) => false,
-                (Rpc::ReadWrite, _) => true, // all operations are allowed by read-write in the current system
-                (Rpc::All, _) => true,       // all RPC operations are allowed by definition
             }
         }
     }
 
     #[test]
     fn test_simple_capabilitys() {
-        assert!(Rpc::Read.can_delegate(&Rpc::Read));
-        assert!(!Rpc::ReadWrite.can_delegate(&Rpc::Read),);
-        assert!(Rpc::ReadWrite.can_delegate(&Rpc::ReadWrite),);
+        assert!(Rpc::Read.permits(&Rpc::Read));
+        assert!(Rpc::ReadWrite.permits(&Rpc::Read));
+        assert!(Rpc::ReadWrite.permits(&Rpc::ReadWrite),);
+        assert!(!Rpc::Read.permits(&Rpc::ReadWrite));
+        assert!(!Rpc::Read.permits(&Rpc::All));
+        assert!(Rpc::All.permits(&Rpc::All));
+        assert!(Rpc::All.permits(&Rpc::Read));
+        assert!(Rpc::All.permits(&Rpc::ReadWrite));
     }
 
     #[test]
