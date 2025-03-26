@@ -361,8 +361,10 @@ mod test {
             "208a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
             // Capability Origin: Issuer
             "00",
-            // Capability
-            "0100",
+            // capability: Rpc::ReadWrite
+            "01",
+            // Expires::Never
+            "00",
             // Signature
             "54675ed0b6ba3a830fe24ec8523f776fa43001edfe4cc9e3bd639009a2058b1805de5e05958b46c03b423ed5d1c72acaab48a9f3bf8db2402c82295f085df404",
         ]
